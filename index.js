@@ -6,7 +6,7 @@ import { S3Client, ListObjectsV2Command } from "@aws-sdk/client-s3";
 dotenv.config();
 
 const app = express();
-const PORT = 4000;
+const PORT = process.env.PORT || 4000; // Default to 3000 if not set
 
 const REGION = process.env.AWS_REGION; // Default to us-east-1 if not set
 const BUCKET_NAME =process.env.BUCKET_NAME; // Replace with your actual bucket name
