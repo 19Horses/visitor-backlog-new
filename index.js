@@ -79,29 +79,31 @@ const upload = multer({ storage });
 
 app.post("/api/upload", upload.single("file"), async (req, res) => {
   const file = req.file;
-  if (!file) {
-    return res.status(400).json({ error: "No file uploaded" });
-  }
+  const { key, contentType } = req.body;
 
-  const key = `${Date.now()}-${file.originalname}`;
+  if (!file || !key || !contentType) {
+    return res.status(400).json({ error: "Missing file, key, or contentType" });
+  }
 
   const params = {
     Bucket: BUCKET_NAME,
     Key: key,
     Body: file.buffer,
-    ContentType: file.mimetype,
+    ContentType: contentType,
   };
 
   try {
     const command = new PutObjectCommand(params);
     await s3.send(command);
+
     res.status(200).json({
       message: "Upload successful",
       key,
       url: `${BASE_URL}${key}`,
     });
-  } catch (error) {
-    console.error("Upload failed:", error);
-    res.status(500).json({ error: "Upload failed" });
+  } catch (err) {
+    console.error("S3 Upload Failed:", err);
+    res.status(500).json({ error: "Failed to upload to S3" });
   }
 });
+
