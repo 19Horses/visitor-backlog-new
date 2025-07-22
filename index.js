@@ -62,6 +62,11 @@ app.get("/api/data", async (req, res) => {
   }
 });
 
+app.get('/ping', (req, res) => {
+  res.status(200).send('pong');
+});
+
+
 app.listen(PORT, () => {
   console.log(`✅ Server listening on http://localhost:${PORT}`);
 });
