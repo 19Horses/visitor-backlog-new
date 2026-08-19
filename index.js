@@ -24,6 +24,68 @@ const s3 = new S3Client({
 
 app.use(cors());
 
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// Telegram's HTML parse mode only treats these three as markup
+const escapeHtml = (value) =>
+  String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+
+// Announces a new visitor log entry. Never throws: an alert failing must not
+// fail the upload that triggered it, and the entry is already safely in S3 by
+// the time this runs.
+async function notifyNewEntry(buffer) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+
+  let entry;
+  try {
+    entry = JSON.parse(buffer.toString("utf8"));
+  } catch (err) {
+    console.error("Telegram notify: form data was not valid JSON:", err);
+    return;
+  }
+
+  const field = (value) => escapeHtml(value).trim() || "—";
+  const text = [
+    "<b>New visitor log entry</b>",
+    "",
+    `<b>Name:</b> ${field(entry.username)}`,
+    `<b>Role:</b> ${field(entry.profession)}`,
+    "",
+    `<b>Q:</b> ${field(entry.question)}`,
+    `<b>A:</b> ${field(entry.answer)}`,
+  ].join("\n");
+
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: TELEGRAM_CHAT_ID,
+          text,
+          parse_mode: "HTML",
+          disable_web_page_preview: true,
+        }),
+      },
+    );
+
+    if (!response.ok) {
+      console.error(
+        "Telegram notify failed:",
+        response.status,
+        await response.text(),
+      );
+    }
+  } catch (err) {
+    console.error("Telegram notify failed:", err);
+  }
+}
+
 async function listFiles(prefix) {
   const command = new ListObjectsV2Command({
     Bucket: BUCKET_NAME,
@@ -101,6 +163,14 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
       key,
       url: `${BASE_URL}${key}`,
     });
+
+    // One visitor produces three uploads - the dithered image, the undithered
+    // original and the form JSON - so keying on the JSON alerts exactly once
+    // per entry, and it is the only one carrying the answers. Deliberately not
+    // awaited: the client already has its response.
+    if (key.startsWith("data/")) {
+      notifyNewEntry(file.buffer);
+    }
   } catch (err) {
     console.error("S3 Upload Failed:", err);
     res.status(500).json({ error: "Failed to upload to S3" });
