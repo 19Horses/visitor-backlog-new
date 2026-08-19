@@ -34,10 +34,61 @@ const escapeHtml = (value) =>
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
 
+// The three uploads share a base name, so the photo's key follows from the
+// form's: data/<name>-<stamp>.json -> images/<name>-<stamp>-dithered.png
+const ditheredUrlFor = (dataKey) => {
+  const base = dataKey.replace(/^data\//, "").replace(/\.json$/, "");
+  return `${BASE_URL}images/${encodeURIComponent(`${base}-dithered.png`)}`;
+};
+
+// The uploads run in parallel, so the image may not have landed when the form
+// does. Note S3 answers 403 rather than 404 for a missing object here, since
+// anonymous callers cannot list the bucket - so this checks for a positive OK
+// rather than for a 404.
+async function waitForObject(url, attempts = 6, delayMs = 1000) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      const response = await fetch(url, { method: "HEAD" });
+      if (response.ok) return true;
+    } catch {
+      // network hiccup, treat as not ready yet
+    }
+    if (attempt < attempts - 1) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+  return false;
+}
+
+async function callTelegram(method, payload) {
+  try {
+    const response = await fetch(
+      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, ...payload }),
+      },
+    );
+
+    if (!response.ok) {
+      console.error(
+        `Telegram ${method} failed:`,
+        response.status,
+        await response.text(),
+      );
+    }
+    return response.ok;
+  } catch (err) {
+    console.error(`Telegram ${method} failed:`, err);
+    return false;
+  }
+}
+
 // Announces a new visitor log entry. Never throws: an alert failing must not
 // fail the upload that triggered it, and the entry is already safely in S3 by
 // the time this runs.
-async function notifyNewEntry(buffer) {
+async function notifyNewEntry(key, buffer) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
 
   let entry;
@@ -59,31 +110,30 @@ async function notifyNewEntry(buffer) {
     `<b>A:</b> ${field(entry.answer)}`,
   ].join("\n");
 
-  try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: TELEGRAM_CHAT_ID,
-          text,
-          parse_mode: "HTML",
-          disable_web_page_preview: true,
-        }),
-      },
-    );
+  const photo = ditheredUrlFor(key);
+  const hasPhoto = await waitForObject(photo);
 
-    if (!response.ok) {
-      console.error(
-        "Telegram notify failed:",
-        response.status,
-        await response.text(),
-      );
+  if (hasPhoto) {
+    // Telegram caps a photo caption at 1024 characters. The form's own limits
+    // keep it far below that, but rather than risk truncating mid-tag and
+    // breaking the HTML parse, an oversized one goes as its own message.
+    if (text.length <= 1024) {
+      await callTelegram("sendPhoto", {
+        photo,
+        caption: text,
+        parse_mode: "HTML",
+      });
+      return;
     }
-  } catch (err) {
-    console.error("Telegram notify failed:", err);
+
+    await callTelegram("sendPhoto", { photo });
   }
+
+  await callTelegram("sendMessage", {
+    text,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+  });
 }
 
 async function listFiles(prefix) {
@@ -169,7 +219,7 @@ app.post("/api/upload", upload.single("file"), async (req, res) => {
     // per entry, and it is the only one carrying the answers. Deliberately not
     // awaited: the client already has its response.
     if (key.startsWith("data/")) {
-      notifyNewEntry(file.buffer);
+      notifyNewEntry(key, file.buffer);
     }
   } catch (err) {
     console.error("S3 Upload Failed:", err);
